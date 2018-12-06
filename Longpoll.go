@@ -53,7 +53,7 @@ type Longpoll struct {
 var l *Longpoll
 var once sync.Once
 
-func NewLongpoll() *Longpoll {
+func NewLongpoll() *Longpoll { // {{{
 	if nil == l {
 		once.Do(func() {
 			ctx, cancel := context.WithCancel(context.Background())
@@ -83,7 +83,7 @@ func NewLongpoll() *Longpoll {
 	}
 
 	return l
-}
+} // }}}
 
 func (this *Longpoll) sentinel(ctx context.Context, cancel context.CancelFunc) { // {{{
 	sub, err := this.getSubClient()
@@ -115,6 +115,13 @@ func (this *Longpoll) sentinel(ctx context.Context, cancel context.CancelFunc) {
 	//删除过期连接
 	go func() {
 		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				time.Sleep(300e9) //5min
+			}
+
 			fmt.Println("total clients:", len(this.clients))
 			fmt.Println("remove expired clients:")
 			for k, v := range this.clients {
@@ -122,13 +129,6 @@ func (this *Longpoll) sentinel(ctx context.Context, cancel context.CancelFunc) {
 					fmt.Println(k)
 					this.delClient(k)
 				}
-			}
-
-			select {
-			case <-ctx.Done():
-				return
-			default:
-				time.Sleep(300e9)
 			}
 		}
 	}()
