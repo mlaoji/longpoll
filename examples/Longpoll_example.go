@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"math/rand"
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/mlaoji/longpoll"
@@ -12,15 +14,17 @@ import (
 
 func main() {
 	http.HandleFunc("/", home)
+	http.HandleFunc("/getClientId", getClientId)
+	http.HandleFunc("/doEvent", genRandomEvents)
 	http.HandleFunc("/wait", wait)
-
-	go genRandomEvents()
 
 	fmt.Println("Serving at http://127.0.0.1:9001")
 	http.ListenAndServe("127.0.0.1:9001", nil)
 }
 
-func genRandomEvents() {
+func genRandomEvents(w http.ResponseWriter, r *http.Request) { // {{{
+	client_id := r.URL.Query().Get("client_id")
+
 	events := map[string]string{
 		"evt0": "test evt0",
 		"evt1": "test evt1",
@@ -33,29 +37,27 @@ func genRandomEvents() {
 
 	longpoll.LongpollRedisConf = map[string]string{"host": "127.0.0.1:6379", "password": "test"}
 	longpoll.LongpollChannel = "test-longpoll"
-	client_id := "test"
+
+	evt := "evt" + fmt.Sprint(rand.Intn(len(events)))
+
 	lp := longpoll.NewLongpoll()
+	lp.Pub(client_id, evt, events[evt])
 
-	for {
-		time.Sleep(time.Duration(rand.Intn(10000)) * time.Millisecond)
+	w.Write([]byte("do " + evt + " ok"))
+} // }}}
 
-		evt := "evt" + fmt.Sprint(rand.Intn(len(events)))
-		lp.Pub(client_id, evt, events[evt])
-	}
-}
+func wait(w http.ResponseWriter, r *http.Request) { // {{{
+	client_id := r.URL.Query().Get("client_id")
 
-func wait(w http.ResponseWriter, r *http.Request) {
 	longpoll.LongpollRedisConf = map[string]string{"host": "127.0.0.1:6379", "password": "test"}
 	longpoll.LongpollTimeout = 5
 	longpoll.LongpollChannel = "test-longpoll"
 
 	lp := longpoll.NewLongpoll()
 
-	client_id := "test" //实际业务代码里应该使用UUID,超过LongpollClientTTL时刷新
 	msg, err := lp.Run(client_id, w)
 
 	fmt.Println(msg)
-	fmt.Println(err)
 
 	code := 0
 	errmsg := "ok"
@@ -64,6 +66,9 @@ func wait(w http.ResponseWriter, r *http.Request) {
 	case longpoll.ErrTimeout:
 		code = 1
 		errmsg = "timeout"
+	case longpoll.ErrExpired:
+		code = 2
+		errmsg = "expired"
 	}
 
 	data := map[string]interface{}{
@@ -75,7 +80,14 @@ func wait(w http.ResponseWriter, r *http.Request) {
 	}
 
 	res, _ := json.MarshalIndent(data, "", "")
-	w.Write(res)
+
+	w.Write([]byte(strings.Replace(string(res), "\n", "", -1)))
+} // }}}
+
+func getClientId(w http.ResponseWriter, r *http.Request) {
+	//实际业务代码里最好使用UUID(如https://github.com/google/uuid)
+	client_id := "test" + strconv.Itoa(rand.Intn(9999))
+	w.Write([]byte(client_id))
 }
 
 func home(w http.ResponseWriter, r *http.Request) {
@@ -83,41 +95,72 @@ func home(w http.ResponseWriter, r *http.Request) {
 <html>
 <head>
     <title>longpoll example</title>
-<script src="http://code.jquery.com/jquery-1.11.3.min.js"></script>
 </head>
 <body>
     <h1>longpoll example</h1>
 	<h2>Here's whats happening:</h2>
     <ul id="rand-events"></ul>
 <script>
-    (function poll() {
-        var pollUrl = "/wait";
+  ajaxGet("/getClientId", 
+  function(data) {
+	  clientId = data
 
-        $.ajax({ url: pollUrl,
-            success: function(res) {
+	  poll(clientId)
+  })
+
+  function poll(clientId) {
+        var pollUrl = "/wait?client_id="+clientId;
+
+        ajaxGet(pollUrl,
+            function(data) {
+				res = eval("(" + data + ")")
                 if (res) {
 					if(res.code == 0) {
-						$("#rand-events").append("<li>" + res.event+ " :  " + res.data +  " at " +res.time+ "</li>")
-						poll();
+						append("rand-events", res.event+ " :  " + res.data +  " at " +res.time)
+
+						poll(clientId);
 						return;
 					}
                 
 					if(res.code == 1) {
 						console.log("No events, checking again.");
 
-						poll();
+						poll(clientId);
+						return;
+					}
+
+					if(res.code == 2) {
+						console.log("expired, pls reload page.");
+						append("rand-events", "expired at " +res.time)
+						append("rand-events", "<a href='javascript:window.location.reload()'>reload</a>")
+
 						return;
 					}
                 }
 
-                setTimeout(poll, 3000);
-            }, dataType: "json",
-        error: function (data) {
-            console.log("Error in ajax request--trying again shortly...");
-            setTimeout(poll, 3000);
-        }
-        });
-    })();
+                setTimeout("poll(" +clientId+")", 3000);
+            })
+
+	  setTimeout('ajaxGet("/doEvent?client_id=' + clientId +'", function(s){})', 3000)
+    }
+
+function append(objId,html){
+	newdiv=document.createElement("li");
+	newdiv.innerHTML = html
+
+    document.getElementById(objId).appendChild(newdiv)
+}
+
+function ajaxGet(url, fn) {
+    var xhr = new XMLHttpRequest();
+    xhr.open('GET', url, true);
+    xhr.onreadystatechange = function() {
+      if (xhr.readyState == 4 && xhr.status == 200 || xhr.status == 304) {
+        fn.call(this, xhr.responseText);
+      }
+    };
+    xhr.send();
+} 
 </script>
 </body>
 </html>`)

@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
+	"log"
 	"net/http"
 	"strings"
 	"sync"
@@ -70,7 +70,7 @@ func NewLongpoll() *Longpoll { // {{{
 				for {
 					select {
 					case <-ctx.Done():
-						fmt.Println("restart sentinel")
+						log.Println("restart sentinel")
 
 						ctx, cancel := context.WithCancel(context.Background())
 						l.sentinel(ctx, cancel)
@@ -88,7 +88,7 @@ func NewLongpoll() *Longpoll { // {{{
 func (this *Longpoll) sentinel(ctx context.Context, cancel context.CancelFunc) { // {{{
 	sub, err := this.getSubClient()
 	if nil != err {
-		fmt.Printf("getSubClient err: %#v, context canceled\n", err)
+		log.Printf("getSubClient err: %#v, context canceled\n", err)
 		cancel()
 		return
 	}
@@ -99,13 +99,22 @@ func (this *Longpoll) sentinel(ctx context.Context, cancel context.CancelFunc) {
 
 	go func() {
 		for {
-			fmt.Println("wait recevie\n")
+			resv := sub.Receive()
+			if nil != resv.Err {
+				if resv.Timeout() {
+					continue
+				}
 
-			subChan <- sub.Receive()
+				log.Printf("receive  err: %#v, context canceled\n", resv.Err)
+				cancel()
+				return
+			}
+
+			subChan <- resv
 
 			ping := sub.Ping()
 			if nil != ping.Err {
-				fmt.Printf("ping err: %#v, context canceled\n", ping.Err)
+				log.Printf("ping err: %#v, context canceled\n", ping.Err)
 				cancel()
 				return
 			}
@@ -122,11 +131,8 @@ func (this *Longpoll) sentinel(ctx context.Context, cancel context.CancelFunc) {
 				time.Sleep(300e9) //5min
 			}
 
-			fmt.Println("total clients:", len(this.clients))
-			fmt.Println("remove expired clients:")
 			for k, v := range this.clients {
 				if v.addtime+LongpollClientTTL < int(time.Now().Unix()) {
-					fmt.Println(k)
 					this.delClient(k)
 				}
 			}
@@ -134,15 +140,26 @@ func (this *Longpoll) sentinel(ctx context.Context, cancel context.CancelFunc) {
 	}()
 
 	for {
-		fmt.Println("wait subChan")
-
 		select {
-		case msg := <-subChan:
+		case msg, ok := <-subChan:
+			if !ok {
+				log.Println("subChan closed")
+				cancel()
+			}
+
 			if msg.Type == pubsub.Message {
 				var m = Message{}
 				if err = json.Unmarshal([]byte(msg.Message), &m); nil == err {
 					if cli, ok := this.clients[m.ClientId]; ok {
-						cli.messages <- m
+						go func() {
+							select {
+							case cli.messages <- m:
+							case <-time.After(5 * time.Second):
+								log.Println("msg chan timeout")
+							}
+
+							return
+						}()
 					}
 				}
 			}
@@ -166,14 +183,12 @@ func (this *Longpoll) Run(client_id string, w http.ResponseWriter) (msg Message,
 
 	select {
 	case msg = <-cli.messages:
-		this.delClient(msg.ClientId)
-		fmt.Printf("run client msg:%#v\n", msg)
 		return
 	case <-time.After(time.Duration(this.timeout) * time.Second):
-		fmt.Println("timeout")
+		log.Println("timeout:", client_id)
 		err = ErrTimeout
 	case <-closed:
-		fmt.Println("closed")
+		log.Println("closed:", client_id)
 		err = ErrClientClosed
 	}
 
@@ -226,7 +241,6 @@ func (this *Longpoll) Pub(client_id, event string, data interface{}) error { // 
 	}
 
 	pubmsg := strings.Replace(string(msg_string), "\n", "", -1)
-	fmt.Printf("pub message:%#v\n", pubmsg)
 	pub.Cmd("PUBLISH", LongpollChannel, pubmsg)
 
 	return nil
